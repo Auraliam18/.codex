@@ -99,6 +99,7 @@ function renderState() {
   renderLogs();
   renderSignals(state.signals);
   renderRiskStatus(equity);
+  updateLiveResults();
 
   const sym = $("#chart-symbol").value;
   if (state.prices[sym] != null) $("#chart-price").textContent = `$${fmt(state.prices[sym])}`;
@@ -225,7 +226,7 @@ function renderStrategies() {
 
 function strategyCardHTML(s) {
   const c = s.config || {};
-  const tab = openTabs[s.id] || "config";
+  const tab = openTabs[s.id] || "results";
   const symbols = c.symbols || ["BTCUSDT"];
   return `<div class="strategy-card ${s.enabled ? "enabled" : ""}" data-id="${esc(s.id)}">
     <div class="strategy-top">
@@ -240,8 +241,12 @@ function strategyCardHTML(s) {
     <div class="strategy-desc">${esc(s.description)}</div>
 
     <div class="tabs">
-      ${[["config", "تنظیمات"], ["coins", "ارزها"], ["backtest", "بک‌تست"]].map(([t, label]) =>
+      ${[["results", "نتایج"], ["config", "تنظیمات"], ["coins", "ارزها"], ["backtest", "بک‌تست"]].map(([t, label]) =>
         `<button class="tab ${tab === t ? "active" : ""}" onclick="setTab('${esc(s.id)}','${t}')">${label}</button>`).join("")}
+    </div>
+
+    <div class="tab-panel" ${tab !== "results" ? "hidden" : ""}>
+      <div class="live-results" data-id="${esc(s.id)}">${liveResultsHTML(s)}</div>
     </div>
 
     <div class="tab-panel" ${tab !== "config" ? "hidden" : ""}>
@@ -304,10 +309,78 @@ function strategyCardHTML(s) {
     <div class="strategy-foot">
       <span class="strategy-status ${s.enabled ? "on" : "off"}">
         ${s.enabled ? "● فعال — در حال رصد " + symbols.length + " ارز" : "○ غیرفعال"}</span>
-      <button class="btn btn-ghost btn-sm" onclick="deleteStrategy('${esc(s.id)}')">حذف</button>
+      <span style="display:flex; gap:6px">
+        ${s.source === "user" ? `
+          <input type="file" accept=".py" hidden onchange="reuploadStrategy('${esc(s.id)}', this)">
+          <button class="btn btn-ghost btn-sm" title="جایگزینی کد با نسخه جدید فایل"
+                  onclick="this.previousElementSibling.click()">🔄 بروزرسانی فایل</button>` : ""}
+        <button class="btn btn-ghost btn-sm" onclick="deleteStrategy('${esc(s.id)}')">حذف</button>
+      </span>
     </div>
   </div>`;
 }
+
+/* live per-strategy results: positions Bitunix opens show up here too */
+function strategyLive(s) {
+  const st = state || {};
+  const symbols = s.config?.symbols || [];
+  const isLive = st.mode === "live";
+  const positions = (st.positions || []).filter((p) =>
+    isLive ? symbols.includes(p.symbol) : p.strategy_id === s.id);
+  const closed = (st.trades || []).filter((t) => t.strategy_id === s.id && "pnl" in t);
+  const wins = closed.filter((t) => t.pnl > 0);
+  const signals = (st.signals || []).filter((x) => x.strategy_id === s.id);
+  const execs = (st.executions || []).filter((x) => x.strategy_id === s.id);
+  return { positions, closed, wins, signals, execs,
+           pnl: closed.reduce((a, t) => a + t.pnl, 0), isLive };
+}
+
+function liveResultsHTML(s) {
+  const r = strategyLive(s);
+  const posRows = r.positions.length
+    ? r.positions.map((p) => {
+        const pnl = Number(p.pnl ?? p.unrealizedPNL ?? 0);
+        return `<div class="mini-pos">
+          <span>${sideBadge(p.side)} <b dir="ltr">${esc(p.symbol)}</b></span>
+          <span class="num ${pnl >= 0 ? "long-ink" : "short-ink"}" dir="ltr">${pnl >= 0 ? "+" : ""}${fmt(pnl)}</span>
+        </div>`;
+      }).join("")
+    : `<div class="muted small">پوزیشن بازی از این استراتژی روی ${r.isLive ? "صرافی" : "حساب دمو"} نیست</div>`;
+  const lastExec = r.execs[0]
+    ? `آخرین سفارش: ${r.execs[0].side === "LONG" ? "▲" : "▼"} ${esc(r.execs[0].symbol)} @ ${fmt(r.execs[0].price, 4)} · ${faTime(r.execs[0].ts)}`
+    : "هنوز سفارشی ارسال نشده";
+  return `
+    <div class="bt-stats">
+      <div class="bt-stat"><b>${r.signals.length}</b><span>سیگنال</span></div>
+      <div class="bt-stat"><b>${r.positions.length}</b><span>پوزیشن باز</span></div>
+      <div class="bt-stat"><b class="${r.pnl >= 0 ? "long-ink" : "short-ink"}">${r.pnl >= 0 ? "+" : ""}${fmt(r.pnl)}</b><span>سود بسته‌شده (${r.wins.length}/${r.closed.length})</span></div>
+    </div>
+    <div class="mini-pos-list">${posRows}</div>
+    <div class="muted small">${lastExec}</div>`;
+}
+
+function updateLiveResults() {
+  document.querySelectorAll(".live-results").forEach((el) => {
+    const s = strategies.find((x) => x.id === el.dataset.id);
+    if (s) el.innerHTML = liveResultsHTML(s);
+  });
+}
+
+window.reuploadStrategy = async (id, input) => {
+  const file = input.files[0];
+  if (!file) return;
+  const s = strategies.find((x) => x.id === id);
+  const res = await api("/api/strategies/upload", { method: "POST", body: {
+    filename: s?.file || file.name, code: await file.text(),
+  }});
+  input.value = "";
+  if (res.ok) {
+    strategies = await api("/api/strategies");
+    renderStrategies();
+  } else {
+    alert(`بروزرسانی ناموفق: ${res.error}`);
+  }
+};
 
 window.setTab = (id, tab) => {
   openTabs[id] = tab;

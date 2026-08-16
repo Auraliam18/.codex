@@ -313,6 +313,244 @@ def vwap(candles: list[dict], period: int = 50) -> list[Optional[float]]:
     return out
 
 
+def wma(values: list[float], period: int) -> list[Optional[float]]:
+    out: list[Optional[float]] = [None] * len(values)
+    if period <= 0 or len(values) < period:
+        return out
+    denom = period * (period + 1) / 2
+    for i in range(period - 1, len(values)):
+        s = sum(values[i - period + 1 + j] * (j + 1) for j in range(period))
+        out[i] = s / denom
+    return out
+
+
+def hull(values: list[float], period: int = 21) -> list[Optional[float]]:
+    """Hull Moving Average: WMA(2*WMA(n/2) - WMA(n), sqrt(n))."""
+    half = wma(values, max(2, period // 2))
+    full = wma(values, period)
+    diff = [
+        (2 * h - f) if h is not None and f is not None else None
+        for h, f in zip(half, full)
+    ]
+    known = [v for v in diff if v is not None]
+    sq = max(2, int(math.sqrt(period)))
+    hw = wma(known, sq)
+    out: list[Optional[float]] = [None] * len(values)
+    offset = len(diff) - len(known)
+    for i, v in enumerate(hw):
+        out[offset + i] = v
+    return out
+
+
+def ichimoku(candles: list[dict]) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    """(tenkan, kijun, senkou_a, senkou_b) evaluated for the LATEST bar.
+    The cloud under the latest bar uses values from 26 bars back, per spec."""
+    def mid(window: list[dict]) -> float:
+        return (max(c["high"] for c in window) + min(c["low"] for c in window)) / 2
+
+    n = len(candles)
+    if n < 78:  # 52 + 26 shift
+        return None, None, None, None
+    tenkan = mid(candles[n - 9:])
+    kijun = mid(candles[n - 26:])
+    # cloud displaced forward 26 → for today's bar use data ending 26 bars ago
+    past = candles[: n - 26]
+    tenkan_p = mid(past[-9:])
+    kijun_p = mid(past[-26:])
+    senkou_a = (tenkan_p + kijun_p) / 2
+    senkou_b = mid(past[-52:])
+    return tenkan, kijun, senkou_a, senkou_b
+
+
+def keltner(
+    candles: list[dict], period: int = 20, mult: float = 2.0
+) -> tuple[list[Optional[float]], list[Optional[float]], list[Optional[float]]]:
+    closes = [c["close"] for c in candles]
+    mid = ema(closes, period)
+    a = atr(candles, period)
+    upper: list[Optional[float]] = [None] * len(candles)
+    lower: list[Optional[float]] = [None] * len(candles)
+    for i in range(len(candles)):
+        if mid[i] is None or a[i] is None:
+            continue
+        upper[i] = mid[i] + mult * a[i]
+        lower[i] = mid[i] - mult * a[i]
+    return upper, mid, lower
+
+
+def donchian(
+    candles: list[dict], period: int = 20
+) -> tuple[list[Optional[float]], list[Optional[float]]]:
+    hi: list[Optional[float]] = [None] * len(candles)
+    lo: list[Optional[float]] = [None] * len(candles)
+    for i in range(period - 1, len(candles)):
+        window = candles[i - period + 1 : i + 1]
+        hi[i] = max(c["high"] for c in window)
+        lo[i] = min(c["low"] for c in window)
+    return hi, lo
+
+
+def awesome_oscillator(candles: list[dict]) -> list[Optional[float]]:
+    hl2 = [(c["high"] + c["low"]) / 2 for c in candles]
+    fast, slow = sma(hl2, 5), sma(hl2, 34)
+    return [
+        (f - s) if f is not None and s is not None else None
+        for f, s in zip(fast, slow)
+    ]
+
+
+def cmf(candles: list[dict], period: int = 20) -> list[Optional[float]]:
+    """Chaikin Money Flow."""
+    out: list[Optional[float]] = [None] * len(candles)
+    mfv = []
+    for c in candles:
+        rng = c["high"] - c["low"]
+        mult = 0.0 if rng == 0 else ((c["close"] - c["low"]) - (c["high"] - c["close"])) / rng
+        mfv.append(mult * c["volume"])
+    for i in range(period - 1, len(candles)):
+        vol = sum(c["volume"] for c in candles[i - period + 1 : i + 1])
+        if vol <= 0:
+            continue
+        out[i] = sum(mfv[i - period + 1 : i + 1]) / vol
+    return out
+
+
+def roc(values: list[float], period: int = 10) -> list[Optional[float]]:
+    return [
+        ((values[i] - values[i - period]) / values[i - period] * 100)
+        if i >= period and values[i - period] else None
+        for i in range(len(values))
+    ]
+
+
+def aroon(
+    candles: list[dict], period: int = 25
+) -> tuple[list[Optional[float]], list[Optional[float]]]:
+    up: list[Optional[float]] = [None] * len(candles)
+    dn: list[Optional[float]] = [None] * len(candles)
+    for i in range(period, len(candles)):
+        window = candles[i - period : i + 1]
+        highs = [c["high"] for c in window]
+        lows = [c["low"] for c in window]
+        up[i] = (highs.index(max(highs))) / period * 100
+        dn[i] = (lows.index(min(lows))) / period * 100
+    return up, dn
+
+
+def wavetrend(
+    candles: list[dict], channel: int = 10, average: int = 21
+) -> tuple[list[Optional[float]], list[Optional[float]]]:
+    """LazyBear WaveTrend oscillator (wt1, wt2)."""
+    hlc3 = [(c["high"] + c["low"] + c["close"]) / 3 for c in candles]
+    esa = ema(hlc3, channel)
+    dev_src = [
+        abs(p - e) if e is not None else None for p, e in zip(hlc3, esa)
+    ]
+    known_dev = [v for v in dev_src if v is not None]
+    d_known = ema(known_dev, channel)
+    d: list[Optional[float]] = [None] * len(hlc3)
+    off = len(dev_src) - len(known_dev)
+    for i, v in enumerate(d_known):
+        d[off + i] = v
+    ci = [
+        ((p - e) / (0.015 * dv)) if e is not None and dv else None
+        for p, e, dv in zip(hlc3, esa, d)
+    ]
+    known_ci = [v for v in ci if v is not None]
+    wt1_known = ema(known_ci, average)
+    wt1: list[Optional[float]] = [None] * len(ci)
+    off = len(ci) - len(known_ci)
+    for i, v in enumerate(wt1_known):
+        wt1[off + i] = v
+    known_wt1 = [v for v in wt1 if v is not None]
+    wt2_known = sma(known_wt1, 4)
+    wt2: list[Optional[float]] = [None] * len(ci)
+    off = len(wt1) - len(known_wt1)
+    for i, v in enumerate(wt2_known):
+        wt2[off + i] = v
+    return wt1, wt2
+
+
+def linreg_value(values: list[float]) -> float:
+    """End value of the least-squares line through the window."""
+    n = len(values)
+    if n < 2:
+        return 0.0
+    xs = range(n)
+    mean_x = (n - 1) / 2
+    mean_y = sum(values) / n
+    cov = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, values))
+    var = sum((x - mean_x) ** 2 for x in xs)
+    slope = cov / var if var else 0.0
+    return mean_y + slope * (n - 1 - mean_x)
+
+
+def squeeze_momentum(
+    candles: list[dict], period: int = 20
+) -> tuple[Optional[bool], Optional[float]]:
+    """LazyBear Squeeze: (squeeze_on, momentum) for the latest bar."""
+    if len(candles) < period + 2:
+        return None, None
+    closes = [c["close"] for c in candles]
+    bb_u, _, bb_l = bollinger(closes, period, 2.0)
+    kc_u, _, kc_l = keltner(candles, period, 1.5)
+    i = len(candles) - 1
+    if None in (bb_u[i], bb_l[i], kc_u[i], kc_l[i]):
+        return None, None
+    on = bb_u[i] < kc_u[i] and bb_l[i] > kc_l[i]
+    window = candles[i - period + 1 : i + 1]
+    hh = max(c["high"] for c in window)
+    ll = min(c["low"] for c in window)
+    mid_sma = sum(closes[i - period + 1 : i + 1]) / period
+    basis = ((hh + ll) / 2 + mid_sma) / 2
+    mom = linreg_value([c["close"] - basis for c in window])
+    return on, mom
+
+
+def heikin_ashi_trend(candles: list[dict]) -> Optional[int]:
+    """+1 when the latest Heikin-Ashi candle is bullish, -1 bearish."""
+    if len(candles) < 3:
+        return None
+    ha_open = (candles[0]["open"] + candles[0]["close"]) / 2
+    ha_close = 0.0
+    for c in candles:
+        ha_close = (c["open"] + c["high"] + c["low"] + c["close"]) / 4
+        ha_open = (ha_open + ha_close) / 2 if c is not candles[0] else ha_open
+    return 1 if ha_close >= ha_open else -1
+
+
+def swing_points(candles: list[dict], strength: int = 2) -> tuple[Optional[float], Optional[float]]:
+    """Most recent confirmed swing high and swing low (fractal strength 2)."""
+    hi = lo = None
+    for i in range(len(candles) - strength - 1, strength - 1, -1):
+        c = candles[i]
+        if hi is None and all(
+            c["high"] >= candles[j]["high"]
+            for j in range(i - strength, i + strength + 1) if j != i
+        ):
+            hi = c["high"]
+        if lo is None and all(
+            c["low"] <= candles[j]["low"]
+            for j in range(i - strength, i + strength + 1) if j != i
+        ):
+            lo = c["low"]
+        if hi is not None and lo is not None:
+            break
+    return hi, lo
+
+
+def classic_pivot(candles: list[dict], window: int = 24) -> Optional[float]:
+    """Classic pivot from the previous `window` bars."""
+    if len(candles) < window * 2:
+        return None
+    prev = candles[-window * 2 : -window]
+    return (
+        max(c["high"] for c in prev)
+        + min(c["low"] for c in prev)
+        + prev[-1]["close"]
+    ) / 3
+
+
 # --------------------------------------------------------------------- signal
 
 

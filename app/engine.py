@@ -101,6 +101,7 @@ class Engine:
         self.paper = PaperBroker(float(self.config.get("paper_balance", 10000.0)))
         self.running = False
         self.signals: list[dict] = []
+        self.executions: list[dict] = []  # orders actually sent/opened, per strategy
         self.logs: list[dict] = []
         self.live_account: dict = {}
         self.live_positions: list[dict] = []
@@ -317,6 +318,7 @@ class Engine:
             "positions": paper_positions if self.config.get("mode") != "live" else self.live_positions,
             "trades": self.trades[-50:][::-1],
             "signals": self.signals[-30:][::-1],
+            "executions": self.executions[-40:][::-1],
             "logs": self.logs[-60:][::-1],
             "prices": self.last_prices,
             "risk": self.config.get("risk", {}),
@@ -449,6 +451,12 @@ class Engine:
                 client_id=f"dash{uuid.uuid4().hex[:10]}",
             )
             self.log("trade", f"سفارش واقعی {signal.side} {symbol} با حجم {qty:g} ثبت شد")
+            self.executions.append({
+                "ts": int(time.time() * 1000), "strategy_id": strategy_id,
+                "symbol": symbol, "side": signal.side, "qty": qty,
+                "price": signal.price, "mode": "live",
+            })
+            self.executions = self.executions[-100:]
         else:
             equity = self.paper.balance
             qty = self._position_qty(equity * leverage, signal, risk_pct)
@@ -462,6 +470,12 @@ class Engine:
                             signal.sl, signal.tp, strategy_id)
             self.log("trade", f"پوزیشن دمو {signal.side} {symbol} باز شد "
                               f"(حجم {qty:g}، اهرم {leverage}x)")
+            self.executions.append({
+                "ts": int(time.time() * 1000), "strategy_id": strategy_id,
+                "symbol": symbol, "side": signal.side, "qty": qty,
+                "price": signal.price, "mode": "paper",
+            })
+            self.executions = self.executions[-100:]
 
     def _record_trade(self, trade: dict) -> None:
         self.trades.append(trade)

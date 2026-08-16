@@ -16,20 +16,33 @@ from . import (
     Signal,
     StrategyMeta,
     adx,
+    aroon,
     atr,
+    awesome_oscillator,
     bollinger,
     cci,
+    classic_pivot,
+    cmf,
+    donchian,
     ema,
+    heikin_ashi_trend,
+    hull,
+    ichimoku,
+    keltner,
     macd,
     mfi,
     obv,
     psar,
+    roc,
     rsi,
     sma,
+    squeeze_momentum,
     stoch_rsi,
     stochastic,
     supertrend,
+    swing_points,
     vwap,
+    wavetrend,
     williams_r,
 )
 
@@ -67,6 +80,26 @@ INDICATOR_MENU: list[dict] = [
     {"id": "obv_slope", "label": "شیب OBV (10 کندل)", "hint": "مثبت = ورود پول"},
     {"id": "momentum_5", "label": "مومنتوم ۵ کندل ٪", "hint": "درصد تغییر"},
     {"id": "close", "label": "قیمت پایانی", "hint": "مقدار خام"},
+    # ── محبوب‌ترین‌های TradingView ──
+    {"id": "wt1", "label": "WaveTrend خط اصلی (WT1)", "hint": "±60 مرزهای اشباع"},
+    {"id": "wt2", "label": "WaveTrend خط سیگنال (WT2)", "hint": ""},
+    {"id": "wt_cross", "label": "کراس WaveTrend", "hint": "1 = WT1 بالای WT2"},
+    {"id": "squeeze_on", "label": "Squeeze فعال (BB داخل KC)", "hint": "1 = فشردگی، آماده انفجار"},
+    {"id": "squeeze_mom", "label": "مومنتوم Squeeze", "hint": "مثبت = صعودی"},
+    {"id": "ichimoku_bull", "label": "قیمت بالای ابر ایچیموکو", "hint": "1 یا 0"},
+    {"id": "tenkan_vs_kijun", "label": "تنکان بالای کیجون (ایچیموکو)", "hint": "1 یا 0"},
+    {"id": "keltner_pos", "label": "موقعیت در کانال کلتنر", "hint": "0=پایین، 1=بالا"},
+    {"id": "donchian_pos", "label": "موقعیت در کانال دانچین", "hint": "0=کف 20 کندل، 1=سقف"},
+    {"id": "hull_rising", "label": "Hull MA صعودی (HMA21)", "hint": "1 یا 0"},
+    {"id": "ao", "label": "Awesome Oscillator", "hint": "مثبت = صعودی"},
+    {"id": "cmf", "label": "Chaikin Money Flow (20)", "hint": "مثبت = ورود پول"},
+    {"id": "roc_10", "label": "ROC نرخ تغییر ۱۰ کندل ٪", "hint": "درصد"},
+    {"id": "aroon_up", "label": "Aroon Up (25)", "hint": "0 تا 100"},
+    {"id": "aroon_down", "label": "Aroon Down (25)", "hint": "0 تا 100"},
+    {"id": "pivot_diff_pct", "label": "فاصله از پیوت کلاسیک ٪", "hint": "مثبت = بالای پیوت"},
+    {"id": "heikin_trend", "label": "روند هیکین‌آشی", "hint": "1 صعودی، -1 نزولی"},
+    {"id": "bos_bull", "label": "شکست ساختار صعودی (BOS)", "hint": "1 = عبور از سقف سوینگ"},
+    {"id": "bos_bear", "label": "شکست ساختار نزولی (BOS)", "hint": "1 = عبور از کف سوینگ"},
 ]
 
 
@@ -93,14 +126,34 @@ def compute_indicator_values(candles: list[dict]) -> Optional[dict]:
     vol_ma = sma(volumes, 20)
     obv_v = obv(candles)
 
+    wt1, wt2 = wavetrend(candles)
+    sq_on, sq_mom = squeeze_momentum(candles, 20)
+    tenkan, kijun, senkou_a, senkou_b = ichimoku(candles)
+    kel_u, kel_m, kel_l = keltner(candles, 20, 2.0)
+    don_h, don_l = donchian(candles, 20)
+    hma = hull(closes, 21)
+    ao_v = awesome_oscillator(candles)
+    cmf_v = cmf(candles, 20)
+    roc_v = roc(closes, 10)
+    ar_up, ar_dn = aroon(candles, 25)
+    pivot = classic_pivot(candles, 24)
+    ha_trend = heikin_ashi_trend(candles)
+    swing_hi, swing_lo = swing_points(candles, 2)
+
     core = (r[i], k[i], d[i], line[i], sig[i], hist[i], e9[i], e20[i], e21[i], e50[i],
             e200[i], upper[i], lower[i], adx_v[i], pdi[i], mdi[i], cci_v[i], mfi_v[i],
-            wr[i], st_dir[i], ps[i], vw[i], a[i], vol_ma[i], srsi[i])
+            wr[i], st_dir[i], ps[i], vw[i], a[i], vol_ma[i], srsi[i],
+            wt1[i], wt2[i], sq_on, sq_mom, tenkan, kijun, senkou_a, senkou_b,
+            kel_u[i], kel_l[i], don_h[i], don_l[i], hma[i], hma[i - 3],
+            ao_v[i], cmf_v[i], roc_v[i], ar_up[i], ar_dn[i], pivot, ha_trend)
     if any(v is None for v in core):
         return None
 
     price = closes[i]
     band = upper[i] - lower[i]
+    kel_band = kel_u[i] - kel_l[i]
+    don_band = don_h[i] - don_l[i]
+    cloud_top = max(senkou_a, senkou_b)
     return {
         "rsi": r[i],
         "stoch_k": k[i],
@@ -132,6 +185,25 @@ def compute_indicator_values(candles: list[dict]) -> Optional[dict]:
         "obv_slope": obv_v[i] - obv_v[i - 10] if i >= 10 else 0.0,
         "momentum_5": (price - closes[i - 5]) / closes[i - 5] * 100 if i >= 5 else 0.0,
         "close": price,
+        "wt1": wt1[i],
+        "wt2": wt2[i],
+        "wt_cross": 1.0 if wt1[i] > wt2[i] else 0.0,
+        "squeeze_on": 1.0 if sq_on else 0.0,
+        "squeeze_mom": sq_mom,
+        "ichimoku_bull": 1.0 if price > cloud_top else 0.0,
+        "tenkan_vs_kijun": 1.0 if tenkan > kijun else 0.0,
+        "keltner_pos": (price - kel_l[i]) / kel_band if kel_band > 0 else 0.5,
+        "donchian_pos": (price - don_l[i]) / don_band if don_band > 0 else 0.5,
+        "hull_rising": 1.0 if hma[i] > hma[i - 3] else 0.0,
+        "ao": ao_v[i],
+        "cmf": cmf_v[i],
+        "roc_10": roc_v[i],
+        "aroon_up": ar_up[i],
+        "aroon_down": ar_dn[i],
+        "pivot_diff_pct": (price - pivot) / pivot * 100 if pivot else 0.0,
+        "heikin_trend": float(ha_trend),
+        "bos_bull": 1.0 if swing_hi is not None and price > swing_hi else 0.0,
+        "bos_bear": 1.0 if swing_lo is not None and price < swing_lo else 0.0,
     }
 
 
