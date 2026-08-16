@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aura Trade Panel — داشبورد اتوترید Bitunix</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ═══════════ Header ═══════════ -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-logo">⚡</div>
+      <div>
+        <h1>Aura Trade Panel</h1>
+        <span class="brand-sub">اتوتریدینگ فیوچرز Bitunix</span>
+      </div>
+    </div>
+
+    <div class="topbar-center">
+      <span id="conn-dot" class="dot dot-off" title="وضعیت اتصال"></span>
+      <span id="conn-text" class="muted">در حال اتصال…</span>
+      <span id="mode-badge" class="badge badge-paper">حالت دمو</span>
+    </div>
+
+    <div class="topbar-actions">
+      <button id="btn-engine" class="btn btn-primary">▶ روشن کردن موتور</button>
+      <button id="btn-settings" class="btn btn-ghost">⚙ تنظیمات</button>
+    </div>
+  </header>
+
+  <!-- ═══════════ Stat tiles ═══════════ -->
+  <section class="stats-row">
+    <div class="stat-tile">
+      <span class="stat-label">اکوییتی حساب</span>
+      <span class="stat-value" id="stat-equity">—</span>
+      <span class="stat-sub" id="stat-balance">موجودی آزاد: —</span>
+    </div>
+    <div class="stat-tile">
+      <span class="stat-label">سود / زیان کل</span>
+      <span class="stat-value" id="stat-pnl">—</span>
+      <span class="stat-sub" id="stat-trades">۰ معامله بسته‌شده</span>
+    </div>
+    <div class="stat-tile">
+      <span class="stat-label">نرخ برد</span>
+      <span class="stat-value" id="stat-winrate">—</span>
+      <div class="winrate-bar"><div id="winrate-fill" class="winrate-fill"></div></div>
+    </div>
+    <div class="stat-tile">
+      <span class="stat-label">پوزیشن‌های باز</span>
+      <span class="stat-value" id="stat-positions">۰</span>
+      <span class="stat-sub" id="stat-engine">موتور: خاموش</span>
+    </div>
+  </section>
+
+  <!-- ═══════════ Chart + Signals ═══════════ -->
+  <section class="grid-2">
+    <div class="card chart-card">
+      <div class="card-head">
+        <h2>نمودار قیمت</h2>
+        <div class="chart-controls">
+          <select id="chart-symbol" class="input input-sm">
+            <option>BTCUSDT</option><option>ETHUSDT</option><option>SOLUSDT</option>
+            <option>XRPUSDT</option><option>DOGEUSDT</option><option>BNBUSDT</option>
+          </select>
+          <select id="chart-interval" class="input input-sm">
+            <option value="1m">۱ دقیقه</option><option value="5m">۵ دقیقه</option>
+            <option value="15m" selected>۱۵ دقیقه</option><option value="1h">۱ ساعت</option>
+            <option value="4h">۴ ساعت</option><option value="1d">روزانه</option>
+          </select>
+          <span id="chart-price" class="chart-price">—</span>
+        </div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="chart"></canvas>
+        <div id="chart-tooltip" class="chart-tooltip" hidden></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>سیگنال‌های زنده</h2><span class="pulse-dot"></span></div>
+      <div id="signals-feed" class="signals-feed">
+        <div class="empty-state">هنوز سیگنالی صادر نشده — استراتژی‌ها را فعال و موتور را روشن کنید</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════ Strategies ═══════════ -->
+  <section class="card">
+    <div class="card-head">
+      <h2>استراتژی‌ها <span class="muted" style="font-weight:400">(بدون محدودیت — هر تعداد که بخواهید)</span></h2>
+      <button id="btn-add-strategy" class="btn btn-ghost">＋ استراتژی سفارشی</button>
+    </div>
+    <div id="strategies-grid" class="strategies-grid"></div>
+  </section>
+
+  <!-- ═══════════ Positions ═══════════ -->
+  <section class="card">
+    <div class="card-head"><h2>پوزیشن‌های باز</h2></div>
+    <div class="table-wrap">
+      <table class="table" id="positions-table">
+        <thead><tr>
+          <th>نماد</th><th>جهت</th><th>ورود</th><th>قیمت فعلی</th><th>حجم</th>
+          <th>اهرم</th><th>حد ضرر</th><th>حد سود</th><th>PnL</th><th></th>
+        </tr></thead>
+        <tbody><tr><td colspan="10" class="empty-state">پوزیشن بازی وجود ندارد</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ═══════════ History + Log ═══════════ -->
+  <section class="grid-2">
+    <div class="card">
+      <div class="card-head"><h2>تاریخچه معاملات</h2></div>
+      <div class="table-wrap">
+        <table class="table" id="trades-table">
+          <thead><tr>
+            <th>زمان</th><th>نماد</th><th>جهت</th><th>ورود</th><th>خروج</th><th>دلیل</th><th>PnL</th>
+          </tr></thead>
+          <tbody><tr><td colspan="7" class="empty-state">معامله‌ای ثبت نشده</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>گزارش رویدادها</h2></div>
+      <div id="log-feed" class="log-feed"></div>
+    </div>
+  </section>
+
+  <footer class="footer">
+    Aura Trade Panel · معاملات فیوچرز ریسک بالایی دارد؛ ابتدا در حالت دمو تست کنید.
+  </footer>
+</div>
+
+<!-- ═══════════ Settings modal ═══════════ -->
+<div id="modal-settings" class="modal-backdrop" hidden>
+  <div class="modal">
+    <div class="modal-head"><h2>تنظیمات اتصال به صرافی</h2><button class="modal-close" data-close>✕</button></div>
+    <div class="modal-body">
+      <label class="field">
+        <span>API Key (بیت‌یونیکس)</span>
+        <input id="set-apikey" class="input" type="text" dir="ltr" placeholder="API Key" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Secret Key</span>
+        <input id="set-secret" class="input" type="password" dir="ltr" placeholder="Secret Key" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>حالت معاملات</span>
+        <select id="set-mode" class="input">
+          <option value="paper">دمو (Paper Trading) — بدون ریسک</option>
+          <option value="live">واقعی (Live) — سفارش واقعی در صرافی ثبت می‌شود ⚠</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>موجودی حساب دمو (USDT)</span>
+        <input id="set-balance" class="input" type="number" dir="ltr" value="10000" min="10">
+      </label>
+      <div id="live-warning" class="alert alert-danger" hidden>
+        ⚠ در حالت واقعی، سیگنال‌ها مستقیماً به سفارش MARKET در فیوچرز Bitunix تبدیل می‌شوند.
+        فقط با سرمایه‌ای که آمادگی از دست دادنش را دارید فعال کنید.
+      </div>
+      <div id="settings-msg" class="settings-msg"></div>
+    </div>
+    <div class="modal-foot">
+      <button id="btn-test-conn" class="btn btn-ghost">🔌 تست اتصال</button>
+      <button id="btn-save-settings" class="btn btn-primary">ذخیره تنظیمات</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ Custom strategy modal ═══════════ -->
+<div id="modal-custom" class="modal-backdrop" hidden>
+  <div class="modal modal-lg">
+    <div class="modal-head"><h2>ساخت استراتژی سفارشی</h2><button class="modal-close" data-close>✕</button></div>
+    <div class="modal-body">
+      <label class="field">
+        <span>نام استراتژی</span>
+        <input id="cs-name" class="input" type="text" placeholder="مثلاً: اسکالپ RSI من">
+      </label>
+      <div class="rules-cols">
+        <div>
+          <h3 class="rules-title long-ink">▲ شرایط ورود لانگ</h3>
+          <div id="cs-long-rules"></div>
+          <button class="btn btn-ghost btn-sm" data-add-rule="long">＋ افزودن شرط</button>
+        </div>
+        <div>
+          <h3 class="rules-title short-ink">▼ شرایط ورود شورت</h3>
+          <div id="cs-short-rules"></div>
+          <button class="btn btn-ghost btn-sm" data-add-rule="short">＋ افزودن شرط</button>
+        </div>
+      </div>
+      <div class="grid-2-form">
+        <label class="field"><span>ضریب ATR حد ضرر</span>
+          <input id="cs-slmult" class="input" type="number" dir="ltr" value="1.5" step="0.1" min="0.2"></label>
+        <label class="field"><span>نسبت ریسک به ریوارد</span>
+          <input id="cs-rr" class="input" type="number" dir="ltr" value="2.0" step="0.1" min="0.5"></label>
+      </div>
+      <p class="muted small">همه شرایط یک ستون باید همزمان برقرار باشند تا سیگنال صادر شود.</p>
+    </div>
+    <div class="modal-foot">
+      <button id="btn-save-custom" class="btn btn-primary">ساخت استراتژی</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
