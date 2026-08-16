@@ -6,12 +6,21 @@ const fmt = (n, d = 2) =>
   n == null || isNaN(n) ? "—" : Number(n).toLocaleString("en-US", { maximumFractionDigits: d });
 const faTime = (ts) =>
   new Date(ts).toLocaleTimeString("fa-IR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const QUICK_COINS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT", "DOGEUSDT",
+  "ADAUSDT", "LINKUSDT", "AVAXUSDT", "TONUSDT", "TRXUSDT", "DOTUSDT", "LTCUSDT",
+  "NEARUSDT", "SUIUSDT", "PEPEUSDT"];
+const VIEW_TITLES = { overview: "نمای کلی", strategies: "استراتژی‌ها", risk: "مدیریت ریسک و سرمایه" };
 
 let state = null;
 let strategies = [];
 let settings = null;
+let indicators = [];
 let candles = [];
 let ws = null;
+const openTabs = {}; // strategy_id -> active tab name
 
 /* ═══════════════ API helpers ═══════════════ */
 async function api(path, opts = {}) {
@@ -44,6 +53,15 @@ function setConn(on) {
   $("#conn-text").textContent = on ? "متصل" : "قطع — تلاش مجدد…";
 }
 
+/* ═══════════════ Views ═══════════════ */
+function switchView(name) {
+  document.querySelectorAll(".view").forEach((v) => (v.hidden = true));
+  $(`#view-${name}`).hidden = false;
+  document.querySelectorAll(".nav-item").forEach((b) =>
+    b.classList.toggle("active", b.dataset.view === name));
+  $("#view-title").textContent = VIEW_TITLES[name] || "";
+}
+
 /* ═══════════════ Rendering ═══════════════ */
 function renderState() {
   if (!state) return;
@@ -60,22 +78,27 @@ function renderState() {
   const pnlEl = $("#stat-pnl");
   pnlEl.textContent = `${pnl >= 0 ? "▲" : "▼"} $${fmt(Math.abs(pnl))}`;
   pnlEl.className = `stat-value ${pnl >= 0 ? "pnl-pos" : "pnl-neg"}`;
-  $("#stat-trades").textContent = `${state.stats.total_trades} معامله بسته‌شده · ${state.stats.wins} برد`;
+  const daily = state.daily_pnl || 0;
+  $("#stat-daily").textContent = `امروز: ${daily >= 0 ? "+" : "−"}$${fmt(Math.abs(daily))}`;
 
   $("#stat-winrate").textContent = state.stats.total_trades ? `${fmt(state.stats.win_rate, 1)}٪` : "—";
   $("#winrate-fill").style.width = `${state.stats.win_rate || 0}%`;
 
   $("#stat-positions").textContent = state.positions.length;
-  $("#stat-engine").textContent = `موتور: ${state.running ? "روشن ✓" : "خاموش"}`;
+  $("#stat-strategies").textContent =
+    `استراتژی فعال: ${strategies.filter((s) => s.enabled).length}`;
 
   const btn = $("#btn-engine");
   btn.textContent = state.running ? "⏸ خاموش کردن موتور" : "▶ روشن کردن موتور";
-  btn.className = `btn ${state.running ? "btn-danger" : "btn-primary"}`;
+  btn.className = `btn btn-block ${state.running ? "btn-danger" : "btn-primary"}`;
+  $("#engine-dot").className = `dot ${state.running ? "dot-on" : "dot-off"}`;
+  $("#engine-label").textContent = state.running ? "موتور روشن" : "موتور خاموش";
 
   renderPositions();
   renderTrades();
   renderLogs();
   renderSignals(state.signals);
+  renderRiskStatus(equity);
 
   const sym = $("#chart-symbol").value;
   if (state.prices[sym] != null) $("#chart-price").textContent = `$${fmt(state.prices[sym])}`;
@@ -89,8 +112,23 @@ function renderSettingsBadge() {
   badge.className = `badge ${live ? "badge-live" : "badge-paper"}`;
 }
 
+function renderRiskStatus(equity) {
+  if (!state) return;
+  const risk = state.risk || {};
+  const daily = state.daily_pnl || 0;
+  const cap = equity > 0 ? equity * (risk.max_daily_loss_pct || 5) / 100 : 0;
+  const el = $("#risk-daily-now");
+  el.textContent = `${daily >= 0 ? "+" : "−"}$${fmt(Math.abs(daily))}`;
+  el.className = `stat-value ${daily >= 0 ? "pnl-pos" : "pnl-neg"}`;
+  $("#risk-daily-cap").textContent = cap ? `سقف ضرر مجاز امروز: $${fmt(cap)}` : "سقف مجاز: —";
+  $("#risk-daily-fill").style.width =
+    cap && daily < 0 ? `${Math.min(100, Math.abs(daily) / cap * 100)}%` : "0";
+  $("#risk-pos-now").textContent = state.positions.length;
+  $("#risk-pos-cap").textContent = `از سقف ${risk.max_open_positions ?? "—"}`;
+}
+
 function sideBadge(side) {
-  const isLong = side === "LONG";
+  const isLong = side === "LONG" || side === "BUY";
   return `<span class="side-badge ${isLong ? "long" : "short"}">${isLong ? "▲ لانگ" : "▼ شورت"}</span>`;
 }
 
@@ -104,8 +142,8 @@ function renderPositions() {
     const pnl = Number(p.pnl ?? p.unrealizedPNL ?? 0);
     const id = p.id ?? p.positionId ?? "";
     return `<tr>
-      <td>${p.symbol}</td>
-      <td>${sideBadge(p.side === "BUY" ? "LONG" : p.side === "SELL" ? "SHORT" : p.side)}</td>
+      <td>${esc(p.symbol)}</td>
+      <td>${sideBadge(p.side)}</td>
       <td class="num">${fmt(p.entry ?? p.avgOpenPrice, 4)}</td>
       <td class="num">${fmt(p.mark ?? p.markPrice, 4)}</td>
       <td class="num">${fmt(p.qty, 6)}</td>
@@ -113,7 +151,7 @@ function renderPositions() {
       <td class="num">${fmt(p.sl, 4)}</td>
       <td class="num">${fmt(p.tp, 4)}</td>
       <td class="num ${pnl >= 0 ? "long-ink" : "short-ink"}">${pnl >= 0 ? "+" : ""}${fmt(pnl)}</td>
-      <td><button class="btn btn-ghost btn-sm" onclick="closePosition('${id}')">بستن</button></td>
+      <td><button class="btn btn-ghost btn-sm" onclick="closePosition('${esc(id)}')">بستن</button></td>
     </tr>`;
   }).join("");
 }
@@ -125,14 +163,14 @@ function renderTrades() {
     tbody.innerHTML = `<tr><td colspan="7" class="empty-state">معامله‌ای ثبت نشده</td></tr>`;
     return;
   }
-  const reasonFa = { SL: "حد ضرر", TP: "حد سود", MANUAL: "دستی" };
+  const reasonFa = { SL: "حد ضرر", TP: "حد سود", MANUAL: "دستی", END: "پایان" };
   tbody.innerHTML = trades.slice(0, 25).map((t) => `<tr>
       <td>${faTime(t.closed_at || t.opened_at)}</td>
-      <td>${t.symbol}</td>
+      <td>${esc(t.symbol)}</td>
       <td>${sideBadge(t.side)}</td>
       <td class="num">${fmt(t.entry, 4)}</td>
       <td class="num">${fmt(t.exit, 4)}</td>
-      <td>${reasonFa[t.close_reason] || t.close_reason || "—"}</td>
+      <td>${reasonFa[t.close_reason] || esc(t.close_reason) || "—"}</td>
       <td class="num ${t.pnl >= 0 ? "long-ink" : "short-ink"}">${t.pnl >= 0 ? "+" : ""}${fmt(t.pnl)}</td>
     </tr>`).join("");
 }
@@ -140,9 +178,9 @@ function renderTrades() {
 function renderLogs() {
   const feed = $("#log-feed");
   feed.innerHTML = (state.logs || []).map((l) =>
-    `<div class="log-line ${l.level}">
+    `<div class="log-line ${esc(l.level)}">
        <span class="log-time">${faTime(l.ts)}</span>
-       <span class="log-text">${l.text}</span>
+       <span class="log-text">${esc(l.text)}</span>
      </div>`).join("") || `<div class="empty-state">رویدادی ثبت نشده</div>`;
 }
 
@@ -150,11 +188,11 @@ function signalHTML(s) {
   const isLong = s.side === "LONG";
   return `<div class="signal-item ${isLong ? "long" : "short"}">
     <div class="signal-top">
-      <span class="signal-side ${isLong ? "long-ink" : "short-ink"}">${isLong ? "▲ لانگ" : "▼ شورت"} · ${s.symbol}</span>
+      <span class="signal-side ${isLong ? "long-ink" : "short-ink"}">${isLong ? "▲ لانگ" : "▼ شورت"} · ${esc(s.symbol)}</span>
       <span class="signal-meta">${faTime(s.ts)}</span>
     </div>
-    <div class="signal-reason">${s.reason}</div>
-    <div class="signal-meta">${s.strategy} · قیمت ${fmt(s.price, 4)} · اطمینان ${Math.round(s.confidence * 100)}٪</div>
+    <div class="signal-reason">${esc(s.reason)}</div>
+    <div class="signal-meta">${esc(s.strategy)} · قیمت ${fmt(s.price, 4)} · اطمینان ${Math.round(s.confidence * 100)}٪</div>
   </div>`;
 }
 
@@ -172,52 +210,109 @@ function prependSignal(s) {
 }
 
 /* ═══════════════ Strategies ═══════════════ */
-const FEATURED = new Set(["aura_liam_max", "liam_trader_9"]);
+const SOURCE_TAGS = { user: "کد شما", custom: "سازنده", builtin: "داخلی" };
 
 function renderStrategies() {
   const grid = $("#strategies-grid");
-  const sorted = [...strategies].sort((a, b) =>
-    (FEATURED.has(b.id) - FEATURED.has(a.id)) || a.name.localeCompare(b.name));
-  grid.innerHTML = sorted.map((s) => {
-    const c = { symbol: "BTCUSDT", interval: "15m", leverage: 5, risk_pct: 2, ...s.config };
-    return `<div class="strategy-card ${s.enabled ? "enabled" : ""}" data-id="${s.id}">
-      <div class="strategy-top">
-        <span class="strategy-name">${FEATURED.has(s.id) ? '<span class="star">★</span>' : ""}${s.name}</span>
-        <label class="switch">
-          <input type="checkbox" ${s.enabled ? "checked" : ""} onchange="toggleStrategy('${s.id}', this.checked)">
-          <span class="track"></span>
-        </label>
-      </div>
-      <div class="strategy-desc">${s.description}</div>
+  if (!strategies.length) {
+    grid.innerHTML = `<div class="empty-state card">هنوز استراتژی‌ای اضافه نکرده‌اید — از بالا شروع کنید</div>`;
+    refreshChartSymbols();
+    return;
+  }
+  grid.innerHTML = strategies.map((s) => strategyCardHTML(s)).join("");
+  refreshChartSymbols();
+}
+
+function strategyCardHTML(s) {
+  const c = s.config || {};
+  const tab = openTabs[s.id] || "config";
+  const symbols = c.symbols || ["BTCUSDT"];
+  return `<div class="strategy-card ${s.enabled ? "enabled" : ""}" data-id="${esc(s.id)}">
+    <div class="strategy-top">
+      <span class="strategy-name">${esc(s.name)}
+        <span class="source-tag">${SOURCE_TAGS[s.source] || ""}</span>
+      </span>
+      <label class="switch">
+        <input type="checkbox" ${s.enabled ? "checked" : ""} onchange="toggleStrategy('${esc(s.id)}', this.checked)">
+        <span class="track"></span>
+      </label>
+    </div>
+    <div class="strategy-desc">${esc(s.description)}</div>
+
+    <div class="tabs">
+      ${[["config", "تنظیمات"], ["coins", "ارزها"], ["backtest", "بک‌تست"]].map(([t, label]) =>
+        `<button class="tab ${tab === t ? "active" : ""}" onclick="setTab('${esc(s.id)}','${t}')">${label}</button>`).join("")}
+    </div>
+
+    <div class="tab-panel" ${tab !== "config" ? "hidden" : ""}>
       <div class="strategy-conf">
-        <label>نماد
-          <select class="input input-sm" data-cfg="symbol" onchange="saveCfg('${s.id}', this)">
-            ${["BTCUSDT","ETHUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","BNBUSDT"].map(
-              (x) => `<option ${c.symbol === x ? "selected" : ""}>${x}</option>`).join("")}
-          </select>
-        </label>
         <label>تایم‌فریم
-          <select class="input input-sm" data-cfg="interval" onchange="saveCfg('${s.id}', this)">
-            ${[["1m","۱ دقیقه"],["5m","۵ دقیقه"],["15m","۱۵ دقیقه"],["1h","۱ ساعت"],["4h","۴ ساعت"]].map(
+          <select class="input input-sm" data-cfg="interval" onchange="saveCfg('${esc(s.id)}', this)">
+            ${[["1m","۱ دقیقه"],["5m","۵ دقیقه"],["15m","۱۵ دقیقه"],["1h","۱ ساعت"],["4h","۴ ساعت"],["1d","روزانه"]].map(
               ([v, t]) => `<option value="${v}" ${c.interval === v ? "selected" : ""}>${t}</option>`).join("")}
           </select>
         </label>
         <label>اهرم
-          <input class="input input-sm" dir="ltr" type="number" min="1" max="100" value="${c.leverage}"
-                 data-cfg="leverage" onchange="saveCfg('${s.id}', this)">
+          <input class="input input-sm" dir="ltr" type="number" min="1" max="125" value="${c.leverage ?? 5}"
+                 data-cfg="leverage" onchange="saveCfg('${esc(s.id)}', this)">
         </label>
         <label>ریسک هر معامله ٪
-          <input class="input input-sm" dir="ltr" type="number" min="0.1" max="20" step="0.1" value="${c.risk_pct}"
-                 data-cfg="risk_pct" onchange="saveCfg('${s.id}', this)">
+          <input class="input input-sm" dir="ltr" type="number" min="0.1" max="20" step="0.1" value="${c.risk_pct ?? 2}"
+                 data-cfg="risk_pct" onchange="saveCfg('${esc(s.id)}', this)">
+        </label>
+        <label>سقف پوزیشن این استراتژی
+          <input class="input input-sm" dir="ltr" type="number" min="1" max="20" value="${c.max_positions ?? 1}"
+                 data-cfg="max_positions" onchange="saveCfg('${esc(s.id)}', this)">
         </label>
       </div>
-      <div class="strategy-foot">
-        <span class="strategy-status ${s.enabled ? "on" : "off"}">${s.enabled ? "● فعال — در حال رصد بازار" : "○ غیرفعال"}</span>
-        ${s.builtin ? "" : `<button class="btn btn-ghost btn-sm" onclick="deleteCustom('${s.id}')">حذف</button>`}
+    </div>
+
+    <div class="tab-panel" ${tab !== "coins" ? "hidden" : ""}>
+      <div class="chips">
+        ${symbols.map((sym) => `<span class="chip">${esc(sym)}
+          <button title="حذف" onclick="removeSymbol('${esc(s.id)}','${esc(sym)}')">✕</button></span>`).join("")}
       </div>
-    </div>`;
-  }).join("");
+      <div class="chip-add">
+        <input class="input input-sm" dir="ltr" placeholder="مثلاً OPUSDT" style="flex:1"
+               onkeydown="if(event.key==='Enter')addSymbol('${esc(s.id)}', this)">
+        <button class="btn btn-ghost btn-sm" onclick="addSymbol('${esc(s.id)}', this.previousElementSibling)">افزودن</button>
+      </div>
+      <div class="quick-coins">
+        ${QUICK_COINS.filter((q) => !symbols.includes(q)).slice(0, 10).map((q) =>
+          `<button class="quick-coin" onclick="addSymbolDirect('${esc(s.id)}','${q}')">＋ ${q}</button>`).join("")}
+      </div>
+    </div>
+
+    <div class="tab-panel" ${tab !== "backtest" ? "hidden" : ""}>
+      <div class="bt-controls">
+        <select class="input input-sm bt-symbol">
+          ${symbols.map((sym) => `<option>${esc(sym)}</option>`).join("")}
+        </select>
+        <select class="input input-sm bt-interval">
+          ${["15m", "5m", "1m", "1h", "4h", "1d"].map((v) =>
+            `<option ${v === (c.interval || "15m") ? "selected" : ""}>${v}</option>`).join("")}
+        </select>
+        <select class="input input-sm bt-bars">
+          <option value="300">۳۰۰ کندل</option><option value="500" selected>۵۰۰ کندل</option>
+          <option value="1000">۱۰۰۰ کندل</option>
+        </select>
+        <button class="btn btn-primary btn-sm" onclick="runBacktest('${esc(s.id)}', this)">اجرای بک‌تست</button>
+      </div>
+      <div class="bt-result"></div>
+    </div>
+
+    <div class="strategy-foot">
+      <span class="strategy-status ${s.enabled ? "on" : "off"}">
+        ${s.enabled ? "● فعال — در حال رصد " + symbols.length + " ارز" : "○ غیرفعال"}</span>
+      <button class="btn btn-ghost btn-sm" onclick="deleteStrategy('${esc(s.id)}')">حذف</button>
+    </div>
+  </div>`;
 }
+
+window.setTab = (id, tab) => {
+  openTabs[id] = tab;
+  renderStrategies();
+};
 
 window.toggleStrategy = async (id, enabled) => {
   await api(`/api/strategies/${id}/toggle`, { method: "POST", body: { enabled } });
@@ -234,9 +329,37 @@ window.saveCfg = async (id, el) => {
   if (s) s.config = { ...s.config, [key]: value };
 };
 
-window.deleteCustom = async (id) => {
-  if (!confirm("این استراتژی سفارشی حذف شود؟")) return;
-  await api(`/api/strategies/custom/${id}`, { method: "DELETE" });
+async function saveSymbols(id, symbols) {
+  await api(`/api/strategies/${id}/config`, { method: "POST", body: { config: { symbols } } });
+  const s = strategies.find((x) => x.id === id);
+  if (s) s.config = { ...s.config, symbols };
+  renderStrategies();
+}
+
+window.addSymbol = (id, input) => {
+  const sym = (input.value || "").trim().toUpperCase();
+  if (!sym) return;
+  const s = strategies.find((x) => x.id === id);
+  const symbols = [...new Set([...(s.config.symbols || []), sym])];
+  saveSymbols(id, symbols);
+};
+
+window.addSymbolDirect = (id, sym) => {
+  const s = strategies.find((x) => x.id === id);
+  const symbols = [...new Set([...(s.config.symbols || []), sym])];
+  saveSymbols(id, symbols);
+};
+
+window.removeSymbol = (id, sym) => {
+  const s = strategies.find((x) => x.id === id);
+  const symbols = (s.config.symbols || []).filter((x) => x !== sym);
+  if (!symbols.length) { alert("حداقل یک ارز باید در واچ‌لیست بماند"); return; }
+  saveSymbols(id, symbols);
+};
+
+window.deleteStrategy = async (id) => {
+  if (!confirm("این استراتژی حذف شود؟")) return;
+  await api(`/api/strategies/${id}`, { method: "DELETE" });
   strategies = await api("/api/strategies");
   renderStrategies();
 };
@@ -247,11 +370,77 @@ window.closePosition = async (id) => {
   refreshState();
 };
 
+/* ═══════════════ Backtest ═══════════════ */
+window.runBacktest = async (id, btn) => {
+  const card = btn.closest(".strategy-card");
+  const out = card.querySelector(".bt-result");
+  out.innerHTML = `<div class="muted small">در حال اجرای بک‌تست…</div>`;
+  btn.disabled = true;
+  try {
+    const res = await api("/api/backtest", { method: "POST", body: {
+      strategy_id: id,
+      symbol: card.querySelector(".bt-symbol").value,
+      interval: card.querySelector(".bt-interval").value,
+      bars: Number(card.querySelector(".bt-bars").value),
+    }});
+    if (!res.ok) { out.innerHTML = `<div class="settings-msg err">✗ ${esc(res.error)}</div>`; return; }
+    const r = res.result;
+    const pf = r.profit_factor == null ? "—" : r.profit_factor;
+    out.innerHTML = `
+      <div class="bt-stats">
+        <div class="bt-stat"><b class="${r.return_pct >= 0 ? "long-ink" : "short-ink"}">${r.return_pct >= 0 ? "+" : ""}${fmt(r.return_pct, 1)}%</b><span>بازده کل</span></div>
+        <div class="bt-stat"><b>${fmt(r.win_rate, 1)}%</b><span>نرخ برد (${r.wins}/${r.total_trades})</span></div>
+        <div class="bt-stat"><b>${pf}</b><span>فاکتور سود</span></div>
+        <div class="bt-stat"><b class="short-ink">−${fmt(r.max_drawdown_pct, 1)}%</b><span>حداکثر افت سرمایه</span></div>
+        <div class="bt-stat"><b>${r.total_trades}</b><span>تعداد معامله</span></div>
+        <div class="bt-stat"><b>$${fmt(r.final_balance)}</b><span>سرمایه نهایی</span></div>
+      </div>
+      <canvas class="bt-curve"></canvas>
+      <div class="muted small">${res.bars} کندل ${esc(res.interval)} روی ${esc(res.symbol)} — نتایج گذشته تضمین آینده نیست.</div>`;
+    drawEquityCurve(out.querySelector(".bt-curve"), r.equity_curve, r.initial_balance);
+  } catch (e) {
+    out.innerHTML = `<div class="settings-msg err">✗ خطا در بک‌تست</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+function drawEquityCurve(canvas, curve, base) {
+  if (!canvas || !curve || curve.length < 2) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth || 300, H = canvas.clientHeight || 70;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const lo = Math.min(...curve), hi = Math.max(...curve);
+  const range = hi - lo || 1;
+  const x = (i) => (i / (curve.length - 1)) * (W - 8) + 4;
+  const y = (v) => 6 + (1 - (v - lo) / range) * (H - 12);
+  // baseline
+  ctx.strokeStyle = "#232a38"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(4, y(base)); ctx.lineTo(W - 4, y(base)); ctx.stroke();
+  const up = curve[curve.length - 1] >= base;
+  ctx.strokeStyle = up ? "#0ca30c" : "#e66767";
+  ctx.lineWidth = 2; ctx.lineJoin = "round";
+  ctx.beginPath();
+  curve.forEach((v, i) => (i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v))));
+  ctx.stroke();
+}
+
 /* ═══════════════ Candlestick chart ═══════════════ */
 const chart = { canvas: null, ctx: null, hover: -1, geom: null };
 
+function refreshChartSymbols() {
+  const sel = $("#chart-symbol");
+  const current = sel.value;
+  const all = new Set(QUICK_COINS.slice(0, 6));
+  strategies.forEach((s) => (s.config.symbols || []).forEach((sym) => all.add(sym)));
+  sel.innerHTML = [...all].map((sym) => `<option>${esc(sym)}</option>`).join("");
+  if (current && all.has(current)) sel.value = current;
+}
+
 async function loadChart() {
-  const symbol = $("#chart-symbol").value;
+  const symbol = $("#chart-symbol").value || "BTCUSDT";
   const interval = $("#chart-interval").value;
   try {
     const data = await api(`/api/klines?symbol=${symbol}&interval=${interval}&limit=90`);
@@ -277,7 +466,6 @@ function drawChart() {
   const step = plotW / candles.length;
   const bw = Math.max(2, Math.min(11, step * 0.65));
 
-  // hairline grid + right-side price labels (LTR numbers)
   ctx.strokeStyle = "#232a38"; ctx.lineWidth = 1;
   ctx.fillStyle = "#8a90a0"; ctx.font = "10.5px system-ui, sans-serif"; ctx.textAlign = "left";
   for (let i = 0; i <= 4; i++) {
@@ -299,7 +487,6 @@ function drawChart() {
     roundRect(ctx, x - bw / 2, top, bw, h, 2); ctx.fill();
   });
 
-  // hover crosshair
   if (chart.hover >= 0 && chart.hover < candles.length) {
     const x = padL + chart.hover * step + step / 2;
     ctx.strokeStyle = "rgba(255,255,255,0.25)"; ctx.setLineDash([4, 4]);
@@ -396,21 +583,51 @@ async function testConnection() {
   }
 }
 
-/* custom strategy builder */
-const INDICATORS = [
-  ["rsi", "RSI (14)"], ["macd_hist", "هیستوگرام MACD"], ["macd_line", "خط MACD"],
-  ["ema_fast_above_slow", "EMA سریع بالای کند (0/1)"], ["bb_pos", "موقعیت بولینگر (0..1)"],
-  ["vol_ratio", "نسبت حجم به میانگین"], ["close", "قیمت پایانی"],
-];
+/* risk settings */
+function fillRiskForm() {
+  const r = settings?.risk || {};
+  $("#risk-per-trade").value = r.default_risk_pct ?? 2;
+  $("#risk-daily").value = r.max_daily_loss_pct ?? 5;
+  $("#risk-maxpos").value = r.max_open_positions ?? 5;
+  $("#risk-maxlev").value = r.max_leverage ?? 20;
+}
 
+async function saveRisk() {
+  const res = await api("/api/settings/risk", { method: "POST", body: {
+    default_risk_pct: Number($("#risk-per-trade").value),
+    max_daily_loss_pct: Number($("#risk-daily").value),
+    max_open_positions: Number($("#risk-maxpos").value),
+    max_leverage: Number($("#risk-maxlev").value),
+  }});
+  const msg = $("#risk-msg");
+  if (res.ok) {
+    if (settings) settings.risk = res.risk;
+    msg.textContent = "✓ قوانین ریسک ذخیره شد";
+    msg.className = "settings-msg ok";
+    refreshState();
+  } else {
+    msg.textContent = "✗ ذخیره نشد";
+    msg.className = "settings-msg err";
+  }
+}
+
+/* custom strategy builder */
 function ruleRowHTML() {
   return `<div class="rule-row">
-    <select class="input r-ind">${INDICATORS.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select>
+    <select class="input r-ind" onchange="showHint(this)">
+      ${indicators.map((it) => `<option value="${esc(it.id)}">${esc(it.label)}</option>`).join("")}
+    </select>
     <select class="input r-op"><option><</option><option>></option><option><=</option><option>>=</option><option>==</option></select>
     <input class="input r-val" dir="ltr" type="number" step="any" value="30">
-    <button class="rule-del" onclick="this.parentElement.remove()">✕</button>
-  </div>`;
+    <button class="rule-del" onclick="this.closest('.rule-row').nextElementSibling?.remove(); this.closest('.rule-row').remove()">✕</button>
+  </div><div class="rule-hint">${esc(indicators[0]?.hint || "")}</div>`;
 }
+
+window.showHint = (sel) => {
+  const it = indicators.find((x) => x.id === sel.value);
+  const hint = sel.closest(".rule-row").nextElementSibling;
+  if (hint && hint.classList.contains("rule-hint")) hint.textContent = it?.hint || "";
+};
 
 function collectRules(containerId) {
   return [...document.querySelectorAll(`${containerId} .rule-row`)].map((row) => ({
@@ -437,6 +654,24 @@ async function saveCustomStrategy() {
   renderStrategies();
 }
 
+/* user python strategy upload */
+async function saveUpload() {
+  const msg = $("#upload-msg");
+  const name = $("#up-name").value.trim() || "my_strategy.py";
+  const code = $("#up-code").value;
+  if (!code.trim()) { msg.textContent = "✗ کد استراتژی خالی است"; msg.className = "settings-msg err"; return; }
+  msg.textContent = "در حال بارگذاری…"; msg.className = "settings-msg";
+  const res = await api("/api/strategies/upload", { method: "POST", body: { filename: name, code } });
+  if (res.ok) {
+    msg.textContent = "✓ استراتژی بارگذاری شد"; msg.className = "settings-msg ok";
+    strategies = await api("/api/strategies");
+    renderStrategies();
+    setTimeout(() => { $("#modal-upload").hidden = true; }, 700);
+  } else {
+    msg.textContent = `✗ ${res.error}`; msg.className = "settings-msg err";
+  }
+}
+
 /* ═══════════════ Bootstrap ═══════════════ */
 async function refreshState() {
   try { state = await api("/api/state"); renderState(); } catch { setConn(false); }
@@ -451,12 +686,17 @@ async function init() {
   });
   window.addEventListener("resize", drawChart);
 
+  document.querySelectorAll(".nav-item").forEach((b) =>
+    b.addEventListener("click", () => switchView(b.dataset.view)));
+
   bindModal("#modal-settings");
   bindModal("#modal-custom");
+  bindModal("#modal-upload");
   $("#btn-settings").onclick = openSettings;
   $("#btn-save-settings").onclick = saveSettings;
   $("#btn-test-conn").onclick = testConnection;
   $("#set-mode").onchange = () => { $("#live-warning").hidden = $("#set-mode").value !== "live"; };
+  $("#btn-save-risk").onclick = saveRisk;
 
   $("#btn-add-strategy").onclick = () => {
     $("#cs-name").value = "";
@@ -472,22 +712,39 @@ async function init() {
   });
   $("#btn-save-custom").onclick = saveCustomStrategy;
 
+  $("#btn-upload-strategy").onclick = () => {
+    $("#upload-msg").textContent = "";
+    $("#modal-upload").hidden = false;
+  };
+  $("#up-file").onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    $("#up-name").value = file.name;
+    $("#up-code").value = await file.text();
+  };
+  $("#btn-save-upload").onclick = saveUpload;
+
   $("#btn-engine").onclick = async () => {
     const running = state?.running;
     if (!running && settings?.mode === "live") {
       if (!confirm("موتور در حالت واقعی روشن می‌شود و سفارش واقعی ثبت خواهد کرد. ادامه می‌دهید؟")) return;
     }
-    await api(`/api/engine/${running ? "stop" : "start"}`, { method: "POST" });
+    const res = await api(`/api/engine/${running ? "stop" : "start"}`, { method: "POST" });
+    if (!running && !res.running) {
+      alert("موتور روشن نشد — در حالت واقعی ابتدا کلید API را در تنظیمات وارد کنید.");
+    }
     refreshState();
   };
 
   $("#chart-symbol").onchange = loadChart;
   $("#chart-interval").onchange = loadChart;
 
-  settings = await api("/api/settings");
+  [settings, strategies, indicators] = await Promise.all([
+    api("/api/settings"), api("/api/strategies"), api("/api/indicators"),
+  ]);
   renderSettingsBadge();
-  strategies = await api("/api/strategies");
   renderStrategies();
+  fillRiskForm();
   await refreshState();
   await loadChart();
   connectWS();

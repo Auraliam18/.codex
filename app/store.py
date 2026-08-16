@@ -12,12 +12,20 @@ DATA_DIR.mkdir(exist_ok=True)
 
 _LOCK = threading.Lock()
 
+DEFAULT_RISK: dict[str, Any] = {
+    "default_risk_pct": 2.0,     # percent of equity risked per trade
+    "max_daily_loss_pct": 5.0,   # stop opening trades after this daily loss
+    "max_open_positions": 5,     # global cap across all strategies
+    "max_leverage": 20,          # hard cap applied to every order
+}
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "api_key": "",
     "secret_key": "",
-    "mode": "paper",  # paper | live
+    "mode": "live",  # live | paper
     "paper_balance": 10000.0,
     "margin_coin": "USDT",
+    "risk": dict(DEFAULT_RISK),
     "strategies": {},  # id -> {"enabled": bool, "config": {...}}
     "custom_strategies": {},  # id -> rule definition
 }
@@ -48,6 +56,7 @@ def save_json(name: str, data: Any) -> None:
 
 def load_config() -> dict:
     cfg = {**DEFAULT_CONFIG, **load_json("config.json", {})}
+    cfg["risk"] = {**DEFAULT_RISK, **cfg.get("risk", {})}
     return cfg
 
 

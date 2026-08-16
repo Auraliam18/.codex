@@ -13,8 +13,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .backtest import run_backtest
 from .bitunix import BitunixError
 from .engine import Engine
+from .strategies import INDICATOR_MENU, get_strategy_class
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
@@ -49,6 +51,13 @@ class SettingsIn(BaseModel):
     paper_balance: Optional[float] = None
 
 
+class RiskIn(BaseModel):
+    default_risk_pct: Optional[float] = None
+    max_daily_loss_pct: Optional[float] = None
+    max_open_positions: Optional[int] = None
+    max_leverage: Optional[int] = None
+
+
 class StrategyToggleIn(BaseModel):
     enabled: bool
 
@@ -64,6 +73,19 @@ class CustomStrategyIn(BaseModel):
     short: list[dict] = []
     atr_sl_mult: float = 1.5
     rr_ratio: float = 2.0
+
+
+class UserStrategyIn(BaseModel):
+    filename: str
+    code: str
+
+
+class BacktestIn(BaseModel):
+    strategy_id: str
+    symbol: str = "BTCUSDT"
+    interval: str = "15m"
+    bars: int = 500
+    initial_balance: float = 10000.0
 
 
 # ----------------------------------------------------------------------- api
@@ -84,6 +106,11 @@ async def post_settings(body: SettingsIn):
     return engine.describe_settings()
 
 
+@app.post("/api/settings/risk")
+async def post_risk(body: RiskIn):
+    return {"ok": True, "risk": engine.update_risk(body.model_dump())}
+
+
 @app.post("/api/settings/test")
 async def test_connection():
     """Verify API keys by fetching the futures account."""
@@ -94,6 +121,11 @@ async def test_connection():
         return JSONResponse({"ok": False, "error": e.message}, status_code=400)
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+@app.get("/api/indicators")
+async def get_indicators():
+    return INDICATOR_MENU
 
 
 @app.get("/api/strategies")
@@ -123,17 +155,54 @@ async def add_custom(body: CustomStrategyIn):
     return {"ok": True, "id": sid}
 
 
-@app.delete("/api/strategies/custom/{strategy_id}")
-async def delete_custom(strategy_id: str):
-    if engine.remove_custom_strategy(strategy_id):
+@app.post("/api/strategies/upload")
+async def upload_strategy(body: UserStrategyIn):
+    try:
+        ids = engine.add_user_strategy(body.filename, body.code)
+        return {"ok": True, "ids": ids}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+@app.delete("/api/strategies/{strategy_id}")
+async def delete_strategy(strategy_id: str):
+    if engine.remove_strategy(strategy_id):
         return {"ok": True}
     return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+
+
+@app.post("/api/backtest")
+async def backtest(body: BacktestIn):
+    cls = get_strategy_class(body.strategy_id)
+    if not cls:
+        return JSONResponse({"ok": False, "error": "استراتژی پیدا نشد"}, status_code=404)
+    st = engine.strategy_state(body.strategy_id)
+    cfg = st.get("config", {})
+    bars = max(200, min(int(body.bars), 1000))
+    try:
+        candles = await engine.client.klines(body.symbol, body.interval, bars)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"دریافت کندل ناموفق: {e}"}, status_code=502)
+    strategy = cls(cfg)
+    if len(candles) <= strategy.min_candles():
+        return JSONResponse(
+            {"ok": False, "error": f"کندل کافی نیست ({len(candles)} از {strategy.min_candles()} موردنیاز)"},
+            status_code=400,
+        )
+    result = run_backtest(
+        strategy, candles,
+        initial_balance=float(body.initial_balance),
+        leverage=int(cfg.get("leverage", 5)),
+        risk_pct=float(cfg.get("risk_pct", 2.0)),
+    )
+    return {"ok": True, "symbol": body.symbol, "interval": body.interval,
+            "bars": len(candles), "result": result}
 
 
 @app.post("/api/engine/start")
 async def start_engine():
     await engine.start()
-    return {"running": True}
+    return {"running": engine.running}
 
 
 @app.post("/api/engine/stop")

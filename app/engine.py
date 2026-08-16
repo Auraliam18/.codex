@@ -1,9 +1,11 @@
 """Trading engine.
 
-Runs one async loop per enabled strategy: fetch klines from Bitunix, ask the
-strategy for a signal, size the position from equity and risk %, then execute
-— on the paper broker in demo mode, or on Bitunix futures in live mode.
-Every state change is broadcast to the dashboard over WebSocket.
+Runs one async loop per enabled strategy. Each loop walks the strategy's
+watchlist symbols: fetch klines from Bitunix, ask the strategy for a signal,
+apply the global risk rules (daily loss cap, open-position cap, leverage cap),
+size the position from equity and risk %, then execute — on the paper broker
+in demo mode, or on Bitunix futures in live mode. Every state change is
+broadcast to the dashboard over WebSocket.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from . import store
@@ -20,13 +23,24 @@ from .strategies import (
     Signal,
     all_strategies,
     get_strategy_class,
+    load_user_strategies,
     make_custom_strategy,
+    save_user_strategy_code,
 )
-from .strategies import _REGISTRY  # registry is intentionally open for customs
+from .strategies import _REGISTRY  # registry is intentionally open
+from .strategies.loader import delete_user_strategy_file
 
 POLL_SECONDS = 10
 MAX_LOG = 200
 MAX_SIGNALS = 100
+
+
+def _strategy_symbols(cfg: dict) -> list[str]:
+    """Watchlist for a strategy; tolerates the legacy single-symbol key."""
+    symbols = cfg.get("symbols")
+    if not symbols:
+        symbols = [cfg.get("symbol", "BTCUSDT")]
+    return [s.strip().upper() for s in symbols if s and s.strip()]
 
 
 class PaperBroker:
@@ -94,7 +108,9 @@ class Engine:
         self._tasks: dict[str, asyncio.Task] = {}
         self._cooldowns: dict[str, float] = {}
         self._listeners: list[Callable[[dict], Any]] = []
+        self.user_files: dict[str, str] = {}  # strategy_id -> filename
         self._load_custom_strategies()
+        self.user_files = load_user_strategies()
 
     # ------------------------------------------------------------- lifecycle
 
@@ -126,8 +142,12 @@ class Engine:
     async def start(self) -> None:
         if self.running:
             return
+        if self.config.get("mode") == "live" and not self.client.has_keys:
+            self.log("error", "حالت واقعی فعال است ولی کلید API تنظیم نشده — از تنظیمات وارد کنید")
+            await self._broadcast("engine", {"running": False})
+            return
         self.running = True
-        self.log("info", "موتور معاملات روشن شد")
+        self.log("info", f"موتور معاملات روشن شد (حالت {'واقعی' if self.config.get('mode') == 'live' else 'دمو'})")
         for sid, st in self.config.get("strategies", {}).items():
             if st.get("enabled"):
                 self._spawn(sid)
@@ -168,8 +188,8 @@ class Engine:
         st = self.strategy_state(strategy_id)
         st["enabled"] = enabled
         store.save_config(self.config)
-        name = getattr(get_strategy_class(strategy_id), "meta", None)
-        label = name.name if name else strategy_id
+        meta = getattr(get_strategy_class(strategy_id), "meta", None)
+        label = meta.name if meta else strategy_id
         if enabled:
             self.log("info", f"استراتژی «{label}» فعال شد")
             if self.running:
@@ -196,6 +216,15 @@ class Engine:
         self.log("info", f"تنظیمات ذخیره شد (حالت: {'واقعی' if self.config['mode'] == 'live' else 'دمو'})")
         await self._broadcast("settings", self.describe_settings())
 
+    def update_risk(self, risk: dict) -> dict:
+        current = self.config.setdefault("risk", dict(store.DEFAULT_RISK))
+        for key in store.DEFAULT_RISK:
+            if key in risk and risk[key] is not None:
+                current[key] = float(risk[key]) if "pct" in key else int(risk[key])
+        store.save_config(self.config)
+        self.log("info", "تنظیمات مدیریت ریسک و سرمایه به‌روزرسانی شد")
+        return current
+
     def add_custom_strategy(self, definition: dict) -> str:
         sid = "custom_" + uuid.uuid4().hex[:8]
         self.config.setdefault("custom_strategies", {})[sid] = definition
@@ -205,11 +234,31 @@ class Engine:
         self.log("info", f"استراتژی سفارشی «{definition.get('name', sid)}» اضافه شد")
         return sid
 
-    def remove_custom_strategy(self, strategy_id: str) -> bool:
-        if strategy_id not in self.config.get("custom_strategies", {}):
+    def add_user_strategy(self, filename: str, code: str) -> list[str]:
+        mapping = save_user_strategy_code(filename, code)
+        self.user_files.update(mapping)
+        for sid in mapping:
+            self.strategy_state(sid)
+        store.save_config(self.config)
+        names = ", ".join(_REGISTRY[sid].meta.name for sid in mapping)
+        self.log("info", f"استراتژی شما بارگذاری شد: {names}")
+        return list(mapping)
+
+    def remove_strategy(self, strategy_id: str) -> bool:
+        """Remove a custom or user strategy."""
+        removed = False
+        if strategy_id in self.config.get("custom_strategies", {}):
+            self.config["custom_strategies"].pop(strategy_id, None)
+            removed = True
+        if strategy_id in self.user_files:
+            filename = self.user_files.pop(strategy_id)
+            # only delete the file when no other strategy id still uses it
+            if filename not in self.user_files.values():
+                delete_user_strategy_file(filename)
+            removed = True
+        if not removed:
             return False
         self._despawn(strategy_id)
-        self.config["custom_strategies"].pop(strategy_id, None)
         self.config.get("strategies", {}).pop(strategy_id, None)
         _REGISTRY.pop(strategy_id, None)
         store.save_config(self.config)
@@ -223,25 +272,37 @@ class Engine:
             if sid == "_custom_template":
                 continue
             st = self.strategy_state(sid)
+            cfg = {**DEFAULT_TRADE_CONFIG, **st.get("config", {})}
+            cfg["symbols"] = _strategy_symbols(cfg)
             out.append({
                 "id": sid,
                 "name": cls.meta.name,
                 "description": cls.meta.description,
-                "builtin": cls.meta.builtin,
+                "source": getattr(cls.meta, "source", "custom"),
                 "enabled": bool(st.get("enabled")),
-                "config": st.get("config", {}),
-                "params": cls.meta.default_config,
+                "config": cfg,
+                "file": self.user_files.get(sid),
             })
         return out
 
     def describe_settings(self) -> dict:
         return {
-            "mode": self.config.get("mode", "paper"),
+            "mode": self.config.get("mode", "live"),
             "has_keys": bool(self.config.get("api_key") and self.config.get("secret_key")),
             "api_key_masked": (self.config.get("api_key", "")[:4] + "•••") if self.config.get("api_key") else "",
             "paper_balance": self.config.get("paper_balance", 10000.0),
             "margin_coin": self.config.get("margin_coin", "USDT"),
+            "risk": self.config.get("risk", dict(store.DEFAULT_RISK)),
         }
+
+    def _daily_realized_pnl(self) -> float:
+        today = datetime.now(timezone.utc).date()
+        total = 0.0
+        for t in self.trades:
+            ts = t.get("closed_at")
+            if ts and datetime.fromtimestamp(ts / 1000, timezone.utc).date() == today:
+                total += t.get("pnl", 0.0)
+        return total
 
     def describe_state(self) -> dict:
         paper_positions = list(self.paper.positions.values())
@@ -249,7 +310,7 @@ class Engine:
         wins = [t for t in closed if t["pnl"] > 0]
         return {
             "running": self.running,
-            "mode": self.config.get("mode", "paper"),
+            "mode": self.config.get("mode", "live"),
             "paper_balance": self.paper.balance,
             "paper_equity": self.paper.balance + sum(p["margin"] + p["pnl"] for p in paper_positions),
             "live_account": self.live_account,
@@ -258,6 +319,8 @@ class Engine:
             "signals": self.signals[-30:][::-1],
             "logs": self.logs[-60:][::-1],
             "prices": self.last_prices,
+            "risk": self.config.get("risk", {}),
+            "daily_pnl": self._daily_realized_pnl(),
             "stats": {
                 "total_trades": len(closed),
                 "wins": len(wins),
@@ -271,22 +334,22 @@ class Engine:
     async def _run_strategy(self, strategy_id: str) -> None:
         cls = get_strategy_class(strategy_id)
         while self.running and cls:
-            try:
-                await self._tick(strategy_id, cls)
-            except asyncio.CancelledError:
-                return
-            except BitunixError as e:
-                self.log("error", f"[{cls.meta.name}] خطای صرافی: {e.message}")
-            except Exception as e:  # keep the loop alive on transient errors
-                self.log("error", f"[{cls.meta.name}] خطا: {e}")
+            st = self.strategy_state(strategy_id)
+            cfg = {**DEFAULT_TRADE_CONFIG, **st.get("config", {})}
+            for symbol in _strategy_symbols(cfg):
+                try:
+                    await self._tick(strategy_id, cls, cfg, symbol)
+                except asyncio.CancelledError:
+                    return
+                except BitunixError as e:
+                    self.log("error", f"[{cls.meta.name} · {symbol}] خطای صرافی: {e.message}")
+                except Exception as e:  # keep the loop alive on transient errors
+                    self.log("error", f"[{cls.meta.name} · {symbol}] خطا: {e}")
             await asyncio.sleep(POLL_SECONDS)
 
-    async def _tick(self, strategy_id: str, cls) -> None:
-        st = self.strategy_state(strategy_id)
-        cfg = {**DEFAULT_TRADE_CONFIG, **st.get("config", {})}
-        symbol, interval = cfg["symbol"], cfg["interval"]
-
-        strategy = cls(st.get("config", {}))
+    async def _tick(self, strategy_id: str, cls, cfg: dict, symbol: str) -> None:
+        interval = cfg["interval"]
+        strategy = cls(cfg)
         candles = await self.client.klines(symbol, interval, max(strategy.min_candles(), 150))
         if len(candles) < strategy.min_candles():
             return
@@ -324,33 +387,53 @@ class Engine:
         await self._execute(strategy_id, cls.meta.name, symbol, signal, cfg)
         await self._broadcast("state", self.describe_state())
 
-    def _position_qty(self, equity: float, signal: Signal, cfg: dict) -> float:
+    def _position_qty(self, equity: float, signal: Signal, risk_pct: float) -> float:
         """Risk-based sizing: risk_pct of equity lost if SL is hit."""
-        risk_amount = equity * float(cfg.get("risk_pct", 2.0)) / 100.0
+        risk_amount = equity * risk_pct / 100.0
         sl_dist = abs(signal.price - signal.sl) if signal.sl else signal.price * 0.01
         if sl_dist <= 0:
             sl_dist = signal.price * 0.01
-        qty = risk_amount / sl_dist
-        return max(round(qty, 6), 0.0)
+        return max(round(risk_amount / sl_dist, 6), 0.0)
+
+    def _risk_gate(self, name: str) -> bool:
+        """Global money-management rules; True when a new trade may open."""
+        risk = self.config.get("risk", store.DEFAULT_RISK)
+        open_count = (len(self.live_positions) if self.config.get("mode") == "live"
+                      else len(self.paper.positions))
+        if open_count >= int(risk.get("max_open_positions", 5)):
+            self.log("info", f"[{name}] سقف کل پوزیشن‌های باز ({open_count}) پر است — ورود جدید مسدود شد")
+            return False
+        equity = (float(self.live_account.get("equity") or self.live_account.get("available") or 0)
+                  if self.config.get("mode") == "live" else self.paper.balance)
+        daily = self._daily_realized_pnl()
+        max_daily = float(risk.get("max_daily_loss_pct", 5.0))
+        if equity > 0 and daily < 0 and abs(daily) >= equity * max_daily / 100.0:
+            self.log("error", f"[{name}] سقف ضرر روزانه ({max_daily}٪) پر شده — معاملات امروز متوقف است")
+            return False
+        return True
 
     async def _execute(self, strategy_id: str, name: str, symbol: str,
                        signal: Signal, cfg: dict) -> None:
-        open_here = [p for p in self.paper.positions.values()
-                     if p["strategy_id"] == strategy_id] \
-            if self.config.get("mode") != "live" else \
-            [p for p in self.live_positions if p.get("symbol") == symbol]
+        if not self._risk_gate(name):
+            return
+        open_here = ([p for p in self.paper.positions.values() if p["strategy_id"] == strategy_id]
+                     if self.config.get("mode") != "live"
+                     else [p for p in self.live_positions if p.get("symbol") == symbol])
         if len(open_here) >= int(cfg.get("max_positions", 1)):
-            self.log("info", f"[{name}] سقف پوزیشن باز پر است — سیگنال نادیده گرفته شد")
+            self.log("info", f"[{name}] سقف پوزیشن این استراتژی پر است — سیگنال نادیده گرفته شد")
             return
 
-        leverage = int(cfg.get("leverage", 5))
+        risk = self.config.get("risk", store.DEFAULT_RISK)
+        leverage = min(int(cfg.get("leverage", 5)), int(risk.get("max_leverage", 20)))
+        risk_pct = float(cfg.get("risk_pct") or risk.get("default_risk_pct", 2.0))
+
         if self.config.get("mode") == "live":
             equity = float(self.live_account.get("available", 0) or 0)
             if equity <= 0:
                 acc = await self.client.account(self.config.get("margin_coin", "USDT"))
                 self.live_account = acc
                 equity = float(acc.get("available", 0) or 0)
-            qty = self._position_qty(equity * leverage, signal, cfg)
+            qty = self._position_qty(equity * leverage, signal, risk_pct)
             if qty <= 0:
                 self.log("error", f"[{name}] موجودی کافی برای باز کردن پوزیشن نیست")
                 return
@@ -368,15 +451,15 @@ class Engine:
             self.log("trade", f"سفارش واقعی {signal.side} {symbol} با حجم {qty:g} ثبت شد")
         else:
             equity = self.paper.balance
-            qty = self._position_qty(equity * leverage, signal, cfg)
+            qty = self._position_qty(equity * leverage, signal, risk_pct)
             if qty <= 0 or self.paper.balance <= 0:
                 self.log("error", f"[{name}] موجودی دمو کافی نیست")
                 return
             margin_needed = signal.price * qty / max(leverage, 1)
             if margin_needed > self.paper.balance:
                 qty = round(self.paper.balance * 0.95 * leverage / signal.price, 6)
-            pos = self.paper.open(symbol, signal.side, signal.price, qty, leverage,
-                                  signal.sl, signal.tp, strategy_id)
+            self.paper.open(symbol, signal.side, signal.price, qty, leverage,
+                            signal.sl, signal.tp, strategy_id)
             self.log("trade", f"پوزیشن دمو {signal.side} {symbol} باز شد "
                               f"(حجم {qty:g}، اهرم {leverage}x)")
 
