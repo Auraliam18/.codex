@@ -39,7 +39,7 @@ async def _live_refresher():
         await asyncio.sleep(15)
 
 
-app = FastAPI(title="Aura Trade Panel", lifespan=lifespan)
+app = FastAPI(title="Liam Trader 9", lifespan=lifespan)
 
 
 # --------------------------------------------------------------------- models

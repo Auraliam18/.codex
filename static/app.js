@@ -1,4 +1,4 @@
-/* Aura Trade Panel — frontend logic */
+/* Liam Trader 9 — frontend logic */
 "use strict";
 
 const $ = (sel) => document.querySelector(sel);
